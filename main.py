@@ -4,10 +4,8 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import time
-import asyncio
-import aiohttp
-from typing import Optional
 import logging
+from typing import Optional
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +16,7 @@ app = FastAPI(title="AI Image Generator", version="1.0.0")
 # Add CORS middleware for mobile app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,24 +27,23 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 if not HF_TOKEN:
     logger.error("HF_TOKEN environment variable not set!")
 
-# Multiple model options for better quality
+# Simplified model options (using models that are more likely to work)
 MODEL_MAP = {
     "realistic": "stabilityai/stable-diffusion-xl-base-1.0",
-    "anime": "cagliostrolab/animagine-xl-3.1",
-    "artistic": "runwayml/stable-diffusion-v1-5",
-    "photorealistic": "SG161222/RealVisXL_V4.0",
-    "digital_art": "prompthero/openjourney-v4",
+    "anime": "stabilityai/stable-diffusion-xl-base-1.0",  # Use same model with different prompts
+    "artistic": "stabilityai/stable-diffusion-xl-base-1.0",
+    "digital_art": "stabilityai/stable-diffusion-xl-base-1.0",
 }
 
 BASE_URL = "https://api-inference.huggingface.co/models/"
 headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-# Quality presets
+# Quality presets (more conservative sizes)
 QUALITY_PRESETS = {
-    "draft": {"width": 512, "height": 512, "guidance_scale": 7.5, "num_inference_steps": 20},
-    "standard": {"width": 768, "height": 768, "guidance_scale": 7.5, "num_inference_steps": 30},
-    "high": {"width": 1024, "height": 1024, "guidance_scale": 9.0, "num_inference_steps": 40},
-    "ultra": {"width": 1536, "height": 1536, "guidance_scale": 10.0, "num_inference_steps": 50},
+    "draft": {"width": 512, "height": 512},
+    "standard": {"width": 768, "height": 768},
+    "high": {"width": 1024, "height": 1024},
+    "ultra": {"width": 1024, "height": 1024},  # Keep same as high for stability
 }
 
 @app.get("/")
@@ -65,44 +62,39 @@ def get_available_models():
         "quality_presets": QUALITY_PRESETS
     }
 
-async def wait_for_model(api_url: str, max_wait: int = 300) -> bool:
-    """Wait for model to load if it's sleeping"""
-    async with aiohttp.ClientSession() as session:
-        for _ in range(max_wait // 10):
-            try:
-                async with session.post(
-                    api_url,
-                    headers=headers,
-                    json={"inputs": "test", "parameters": {"width": 512, "height": 512}},
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if response.status == 200:
-                        return True
-                    elif response.status == 503:
-                        # Model is loading
-                        await asyncio.sleep(10)
-                        continue
-                    else:
-                        return False
-            except Exception:
-                await asyncio.sleep(10)
+def wait_for_model(api_url: str, max_wait: int = 120) -> bool:
+    """Wait for model to load if it's sleeping - synchronous version"""
+    for i in range(max_wait // 10):
+        try:
+            # Try a simple test request
+            test_payload = {"inputs": "test"}
+            response = requests.post(api_url, headers=headers, json=test_payload, timeout=10)
+            
+            if response.status_code == 200:
+                return True
+            elif response.status_code == 503:
+                logger.info(f"Model loading... attempt {i+1}/{max_wait//10}")
+                time.sleep(10)
                 continue
+            else:
+                return False
+        except Exception as e:
+            logger.warning(f"Wait attempt {i+1} failed: {e}")
+            time.sleep(10)
+            continue
     return False
 
 @app.get("/generate")
-async def generate(
+def generate(
     prompt: str = Query(..., description="Your text prompt for image generation"),
     theme: str = Query("realistic", description="Theme/style of the image"),
     quality: str = Query("standard", description="Quality preset (draft, standard, high, ultra)"),
     width: Optional[int] = Query(None, description="Custom width (overrides quality preset)"),
     height: Optional[int] = Query(None, description="Custom height (overrides quality preset)"),
-    guidance_scale: Optional[float] = Query(None, description="Guidance scale (7.5-15.0)"),
-    num_steps: Optional[int] = Query(None, description="Number of inference steps"),
     negative_prompt: str = Query(
-        "blurry, low quality, distorted, deformed, extra limbs, bad anatomy, text, watermark", 
+        "blurry, low quality, distorted, deformed", 
         description="Negative prompt to avoid unwanted elements"
     ),
-    seed: Optional[int] = Query(None, description="Seed for reproducible results"),
     enhance_prompt: bool = Query(True, description="Automatically enhance the prompt")
 ):
     try:
@@ -122,82 +114,52 @@ async def generate(
 
         # Override with custom settings if provided
         if width:
-            quality_settings["width"] = min(max(width, 256), 2048)  # Clamp between 256-2048
+            quality_settings["width"] = min(max(width, 256), 1024)  # Limit to 1024 for stability
         if height:
-            quality_settings["height"] = min(max(height, 256), 2048)
-        if guidance_scale:
-            quality_settings["guidance_scale"] = min(max(guidance_scale, 1.0), 20.0)
-        if num_steps:
-            quality_settings["num_inference_steps"] = min(max(num_steps, 10), 100)
+            quality_settings["height"] = min(max(height, 256), 1024)
 
-        # Enhance prompt if requested
+        # Enhance prompt based on theme
         if enhance_prompt:
             prompt_enhancers = {
-                "realistic": "highly detailed, professional photography, sharp focus, realistic lighting, 8k uhd",
-                "anime": "anime style, detailed, vibrant colors, manga illustration, high quality",
-                "artistic": "artistic, creative, detailed artwork, masterpiece, high resolution",
-                "photorealistic": "photorealistic, ultra detailed, professional photo, sharp, clear",
-                "digital_art": "digital art, concept art, detailed illustration, artstation trending"
+                "realistic": "highly detailed, professional photography, sharp focus, realistic, 8k uhd",
+                "anime": "anime style, detailed, vibrant colors, manga illustration, anime art style",
+                "artistic": "artistic, creative, detailed artwork, masterpiece, oil painting style",
+                "digital_art": "digital art, concept art, detailed illustration, trending on artstation"
             }
             enhancement = prompt_enhancers.get(theme, "high quality, detailed")
             full_prompt = f"{prompt}, {enhancement}"
         else:
             full_prompt = f"{prompt}, {theme} style"
 
-        # Prepare payload
+        # Prepare payload - keep it simple
         payload = {
             "inputs": full_prompt,
-            "parameters": {
-                **quality_settings,
-                "negative_prompt": negative_prompt,
-            }
+            "parameters": quality_settings
         }
 
-        # Add seed if provided
-        if seed is not None:
-            payload["parameters"]["seed"] = seed
+        # Add negative prompt only if the model supports it
+        if negative_prompt and theme == "realistic":
+            payload["parameters"]["negative_prompt"] = negative_prompt
 
         logger.info(f"Generating image with prompt: {full_prompt[:100]}...")
         
-        # Check if model needs to wake up
-        async with aiohttp.ClientSession() as session:
-            start_time = time.time()
-            
-            async with session.post(api_url, headers=headers, json=payload) as response:
-                if response.status == 503:
-                    # Model is loading, wait for it
-                    logger.info("Model is loading, waiting...")
-                    if await wait_for_model(api_url):
-                        # Try again after model loads
-                        async with session.post(api_url, headers=headers, json=payload) as retry_response:
-                            if retry_response.status == 200:
-                                content = await retry_response.read()
-                                generation_time = time.time() - start_time
-                                logger.info(f"Image generated successfully in {generation_time:.2f}s")
-                                
-                                return Response(
-                                    content=content, 
-                                    media_type="image/png",
-                                    headers={
-                                        "X-Generation-Time": str(generation_time),
-                                        "X-Model-Used": model_name,
-                                        "X-Quality": quality
-                                    }
-                                )
-                            else:
-                                error_text = await retry_response.text()
-                                logger.error(f"Error after retry: {error_text}")
-                                raise HTTPException(status_code=500, detail=f"Generation failed: {error_text}")
-                    else:
-                        raise HTTPException(status_code=503, detail="Model loading timeout")
-                
-                elif response.status == 200:
-                    content = await response.read()
+        start_time = time.time()
+        
+        # Make the request
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 503:
+            # Model is loading, wait for it
+            logger.info("Model is loading, waiting...")
+            if wait_for_model(api_url):
+                # Try again after model loads
+                response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+                if response.status_code == 200:
                     generation_time = time.time() - start_time
                     logger.info(f"Image generated successfully in {generation_time:.2f}s")
                     
                     return Response(
-                        content=content, 
+                        content=response.content, 
                         media_type="image/png",
                         headers={
                             "X-Generation-Time": str(generation_time),
@@ -206,10 +168,31 @@ async def generate(
                         }
                     )
                 else:
-                    error_text = await response.text()
-                    logger.error(f"Generation error: {error_text}")
-                    raise HTTPException(status_code=response.status, detail=error_text)
+                    logger.error(f"Error after retry: {response.text}")
+                    raise HTTPException(status_code=500, detail=f"Generation failed: {response.text}")
+            else:
+                raise HTTPException(status_code=503, detail="Model loading timeout")
+        
+        elif response.status_code == 200:
+            generation_time = time.time() - start_time
+            logger.info(f"Image generated successfully in {generation_time:.2f}s")
+            
+            return Response(
+                content=response.content, 
+                media_type="image/png",
+                headers={
+                    "X-Generation-Time": str(generation_time),
+                    "X-Model-Used": model_name,
+                    "X-Quality": quality
+                }
+            )
+        else:
+            logger.error(f"Generation error: {response.text}")
+            raise HTTPException(status_code=response.status_code, detail=response.text)
 
+    except requests.exceptions.Timeout:
+        logger.error("Request timeout")
+        raise HTTPException(status_code=408, detail="Request timeout - try again or use lower quality")
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -218,6 +201,27 @@ async def generate(
 def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": time.time()}
+
+# Simple test endpoint
+@app.get("/test")
+def test_generation():
+    """Test endpoint with a simple prompt"""
+    try:
+        api_url = f"{BASE_URL}stabilityai/stable-diffusion-xl-base-1.0"
+        payload = {
+            "inputs": "a beautiful sunset, realistic style",
+            "parameters": {"width": 512, "height": 512}
+        }
+        
+        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            return Response(content=response.content, media_type="image/png")
+        else:
+            return {"error": response.text, "status_code": response.status_code}
+            
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
