@@ -1,9 +1,13 @@
-FROM python:3.10-slim
+FROM python:3.9
 
 WORKDIR /code
-COPY requirements.txt .
-RUN pip install -r requirements.txt
 
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy app files
 COPY . .
 
+# Run app with uvicorn
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
