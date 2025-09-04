@@ -66,6 +66,8 @@ QUALITY_PRESETS = {
 
 def run_generation(job_id, models_to_try, prompt, quality_settings, negative_prompt=None):
     """Background worker that calls Hugging Face and saves the result."""
+    jobs[job_id]["status"] = "processing"  # Add this line
+
     
     for model_name in models_to_try:
         api_url = f"{BASE_URL}{model_name}"
@@ -78,7 +80,11 @@ def run_generation(job_id, models_to_try, prompt, quality_settings, negative_pro
 
         try:
             logger.info(f"[{job_id}] Trying model: {model_name}")
+            jobs[job_id]["current_model"] = model_name 
             response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+            logger.info(f"[{job_id}] Response status: {response.status_code}")
+            logger.info(f"[{job_id}] Content-Type: {response.headers.get('content-type')}")
+
 
             if response.status_code == 200:
                 # Check if response is actually an image
@@ -258,3 +264,17 @@ async def startup_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7860)
+
+@app.get("/debug/{job_id}")
+def debug_job(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        return {"error": "Job not found"}
+    
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "current_model": job.get("current_model"),
+        "created": job.get("created"),
+        "error": job.get("error")
+    }
