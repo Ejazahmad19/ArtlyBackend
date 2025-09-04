@@ -8,6 +8,7 @@ import logging
 import uuid
 import threading
 from typing import Optional
+import json
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -34,49 +35,89 @@ headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 # Simple in-memory job store
 jobs = {}
 
-# Model map (you can expand later)
+# Alternative models (try different ones if one fails)
 MODEL_MAP = {
-    "realistic": "stabilityai/stable-diffusion-xl-base-1.0",
-    "anime": "stabilityai/stable-diffusion-xl-base-1.0",
-    "artistic": "stabilityai/stable-diffusion-xl-base-1.0",
-    "digital_art": "stabilityai/stable-diffusion-xl-base-1.0",
+    "realistic": [
+        "runwayml/stable-diffusion-v1-5",
+        "stabilityai/stable-diffusion-2-1",
+        "CompVis/stable-diffusion-v1-4"
+    ],
+    "anime": [
+        "runwayml/stable-diffusion-v1-5",
+        "hakurei/waifu-diffusion"
+    ],
+    "artistic": [
+        "runwayml/stable-diffusion-v1-5",
+        "stabilityai/stable-diffusion-2-1"
+    ],
+    "digital_art": [
+        "runwayml/stable-diffusion-v1-5",
+        "stabilityai/stable-diffusion-2-1"
+    ],
 }
 
 # Quality presets
 QUALITY_PRESETS = {
-    "draft": {"width": 512, "height": 512},
-    "standard": {"width": 768, "height": 768},
-    "high": {"width": 1024, "height": 1024},
+    "draft": {"width": 512, "height": 512, "num_inference_steps": 20},
+    "standard": {"width": 512, "height": 512, "num_inference_steps": 30},
+    "high": {"width": 512, "height": 512, "num_inference_steps": 50},
 }
 
 
-def run_generation(job_id, model_name, prompt, quality_settings, negative_prompt=None):
+def run_generation(job_id, models_to_try, prompt, quality_settings, negative_prompt=None):
     """Background worker that calls Hugging Face and saves the result."""
-    api_url = f"{BASE_URL}{model_name}"
-    payload = {
-        "inputs": prompt,
-        "parameters": quality_settings
-    }
-    if negative_prompt:
-        payload["parameters"]["negative_prompt"] = negative_prompt
+    
+    for model_name in models_to_try:
+        api_url = f"{BASE_URL}{model_name}"
+        payload = {
+            "inputs": prompt,
+            "parameters": quality_settings
+        }
+        if negative_prompt:
+            payload["parameters"]["negative_prompt"] = negative_prompt
 
-    try:
-        logger.info(f"[{job_id}] Starting generation…")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        try:
+            logger.info(f"[{job_id}] Trying model: {model_name}")
+            response = requests.post(api_url, headers=headers, json=payload, timeout=120)
 
-        if response.status_code == 200:
-            jobs[job_id]["status"] = "done"
-            jobs[job_id]["image"] = response.content
-            logger.info(f"[{job_id}] Finished successfully")
-        else:
-            jobs[job_id]["status"] = "error"
-            jobs[job_id]["error"] = response.text
-            logger.error(f"[{job_id}] Failed: {response.text}")
+            if response.status_code == 200:
+                # Check if response is actually an image
+                if response.headers.get('content-type', '').startswith('image/'):
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id]["image"] = response.content
+                    jobs[job_id]["model_used"] = model_name
+                    logger.info(f"[{job_id}] Finished successfully with {model_name}")
+                    return
+                else:
+                    logger.warning(f"[{job_id}] {model_name} returned non-image content")
+                    continue
+            
+            elif response.status_code == 503:
+                # Model is loading, wait and try next
+                logger.warning(f"[{job_id}] {model_name} is loading, trying next...")
+                continue
+                
+            elif response.status_code == 504:
+                # Gateway timeout, try next model
+                logger.warning(f"[{job_id}] {model_name} timeout, trying next...")
+                continue
+                
+            else:
+                logger.error(f"[{job_id}] {model_name} failed: {response.status_code} - {response.text[:200]}")
+                continue
 
-    except Exception as e:
-        jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = str(e)
-        logger.error(f"[{job_id}] Exception: {e}")
+        except requests.exceptions.Timeout:
+            logger.error(f"[{job_id}] {model_name} request timeout")
+            continue
+            
+        except Exception as e:
+            logger.error(f"[{job_id}] {model_name} exception: {e}")
+            continue
+
+    # If we get here, all models failed
+    jobs[job_id]["status"] = "error"
+    jobs[job_id]["error"] = "All models failed or are currently unavailable. Please try again later."
+    logger.error(f"[{job_id}] All models failed")
 
 
 @app.get("/")
@@ -96,7 +137,7 @@ def health_check():
 @app.get("/models")
 def get_available_models():
     return {
-        "themes": MODEL_MAP,
+        "themes": {k: v[0] for k, v in MODEL_MAP.items()},  # Show primary model
         "quality_presets": QUALITY_PRESETS
     }
 
@@ -114,12 +155,12 @@ def generate(
     if quality not in QUALITY_PRESETS:
         raise HTTPException(status_code=400, detail=f"Invalid quality. Available: {list(QUALITY_PRESETS.keys())}")
 
-    model_name = MODEL_MAP[theme]
+    models_to_try = MODEL_MAP[theme]
     quality_settings = QUALITY_PRESETS[quality].copy()
 
     # Enhance prompt automatically
     enhancers = {
-        "realistic": "highly detailed, professional photography, sharp focus, realistic, 8k uhd",
+        "realistic": "highly detailed, professional photography, sharp focus, realistic",
         "anime": "anime style, vibrant colors, manga illustration",
         "artistic": "artistic, masterpiece, oil painting style",
         "digital_art": "digital art, concept art, trending on artstation"
@@ -129,13 +170,20 @@ def generate(
 
     # Create a job
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {"status": "pending", "created": time.time()}
+    jobs[job_id] = {
+        "status": "pending", 
+        "created": time.time(),
+        "prompt": full_prompt,
+        "theme": theme,
+        "quality": quality
+    }
 
     # Run in background thread
     thread = threading.Thread(
         target=run_generation,
-        args=(job_id, model_name, full_prompt, quality_settings, negative_prompt)
+        args=(job_id, models_to_try, full_prompt, quality_settings, negative_prompt)
     )
+    thread.daemon = True  # Dies when main thread dies
     thread.start()
 
     return {"job_id": job_id, "status": "pending"}
@@ -151,9 +199,60 @@ def get_result(job_id: str):
         return Response(content=job["image"], media_type="image/png")
 
     elif job["status"] == "error":
-        return {"status": "error", "error": job.get("error")}
+        return {
+            "status": "error", 
+            "error": job.get("error", "Unknown error occurred"),
+            "job_id": job_id
+        }
 
-    return {"status": job["status"]}
+    elif job["status"] == "pending":
+        # Check if job is too old (over 5 minutes)
+        if time.time() - job["created"] > 300:
+            job["status"] = "error"
+            job["error"] = "Job timed out"
+            return {"status": "error", "error": "Job timed out"}
+
+    return {
+        "status": job["status"],
+        "job_id": job_id,
+        "created": job["created"]
+    }
+
+
+@app.get("/status/{job_id}")
+def get_status(job_id: str):
+    """Get just the status without downloading the image"""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "created": job["created"],
+        "model_used": job.get("model_used"),
+        "error": job.get("error") if job["status"] == "error" else None
+    }
+
+
+# Clean up old jobs periodically
+@app.on_event("startup")
+async def startup_event():
+    import asyncio
+    
+    async def cleanup_old_jobs():
+        while True:
+            current_time = time.time()
+            old_jobs = [
+                job_id for job_id, job in jobs.items() 
+                if current_time - job["created"] > 3600  # 1 hour
+            ]
+            for job_id in old_jobs:
+                del jobs[job_id]
+            
+            await asyncio.sleep(300)  # Clean every 5 minutes
+    
+    asyncio.create_task(cleanup_old_jobs())
 
 
 if __name__ == "__main__":
