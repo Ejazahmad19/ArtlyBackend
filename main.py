@@ -38,29 +38,33 @@ jobs = {}
 # Alternative models (try different ones if one fails)
 MODEL_MAP = {
     "realistic": [
+        "black-forest-labs/FLUX.1-schnell",  # Fast, reliable
+        "stabilityai/stable-diffusion-xl-base-1.0",
         "runwayml/stable-diffusion-v1-5",
-        "stabilityai/stable-diffusion-2-1",
-        "CompVis/stable-diffusion-v1-4"
+        "Lykon/DreamShaper",
     ],
     "anime": [
-        "runwayml/stable-diffusion-v1-5",
-        "hakurei/waifu-diffusion"
+        "cagliostrolab/animagine-xl-3.1",
+        "Linaqruf/anything-v3.0",
+        "black-forest-labs/FLUX.1-schnell",
     ],
     "artistic": [
-        "runwayml/stable-diffusion-v1-5",
-        "stabilityai/stable-diffusion-2-1"
+        "black-forest-labs/FLUX.1-schnell",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "Lykon/DreamShaper",
     ],
     "digital_art": [
-        "runwayml/stable-diffusion-v1-5",
-        "stabilityai/stable-diffusion-2-1"
+        "black-forest-labs/FLUX.1-schnell",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "Lykon/DreamShaper",
     ],
 }
 
 # Quality presets
 QUALITY_PRESETS = {
-    "draft": {"width": 512, "height": 512, "num_inference_steps": 20},
-    "standard": {"width": 512, "height": 512, "num_inference_steps": 30},
-    "high": {"width": 512, "height": 512, "num_inference_steps": 50},
+    "draft": {"width": 512, "height": 512, "num_inference_steps": 4},
+    "standard": {"width": 512, "height": 512, "num_inference_steps": 8},
+    "high": {"width": 768, "height": 768, "num_inference_steps": 12},
 }
 
 
@@ -278,3 +282,31 @@ def debug_job(job_id: str):
         "created": job.get("created"),
         "error": job.get("error")
     }
+
+@app.get("/debug-token")
+def debug_token():
+    """Test if HF token is working"""
+    if not HF_TOKEN:
+        return {"error": "HF_TOKEN not set"}
+    
+    # Test with a simple model
+    test_url = f"{BASE_URL}black-forest-labs/FLUX.1-schnell"
+    test_payload = {
+        "inputs": "a simple test image",
+        "parameters": {"width": 512, "height": 512, "num_inference_steps": 1}
+    }
+    
+    try:
+        response = requests.post(test_url, headers=headers, json=test_payload, timeout=10)
+        return {
+            "token_set": True,
+            "test_model": "black-forest-labs/FLUX.1-schnell",
+            "status_code": response.status_code,
+            "content_type": response.headers.get('content-type'),
+            "response_text": response.text[:200] if response.status_code != 200 else "OK"
+        }
+    except Exception as e:
+        return {
+            "error": f"Request failed: {str(e)}",
+            "token_set": True
+        }
