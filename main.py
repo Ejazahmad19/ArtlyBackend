@@ -463,3 +463,19 @@ def get_status(job_id: str):
         status_job["estimated_remaining"] = max(0, 60 - (time.time() - job.get("created", time.time())))
 
     return status_job
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    
+    # Get port from environment (Render sets this)
+    port = int(os.environ.get("PORT", 8000))
+    
+    print(f"Starting server on port {port}")
+    
+    uvicorn.run(
+        app,
+        host="0.0.0.0", 
+        port=port,
+        log_level="info"
+    )
