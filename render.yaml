@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: ai-image-generator
+    env: python
+    plan: starter  # or standard for better performance
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: MAX_CONCURRENT_GENERATIONS
+        value: "1"
+      - key: MAX_JOBS_IN_MEMORY
+        value: "5"
+      - key: JOB_TIMEOUT
+        value: "300"
+      - key: IMAGE_CLEANUP_INTERVAL
+        value: "120"
+      - key: MAX_THREAD_WORKERS
+        value: "1"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: HF_HUB_CACHE
+        value: "/tmp/hf_cache"
+    disk:
+      name: ai-models-cache
+      mountPath: /tmp/hf_cache
+      sizeGB: 5
